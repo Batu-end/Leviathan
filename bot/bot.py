@@ -12,6 +12,6 @@ def run_bot():
 
     @client.event
     async def on_ready():
-        print(f'{client.user} has connected to Discord!')
+        print(f'{client.user} has surfaced.')
 
     client.run(TOKEN)
