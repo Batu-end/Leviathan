@@ -1,0 +1,8 @@
+# Environment variables - DO NOT COMMIT
+.env
+
+# Virtual environment
+/venv/
+
+# Python cache
+__pycache__/
