@@ -1,8 +1,9 @@
-# Environment variables - DO NOT COMMIT
 .env
 
-# Virtual environment
 /venv/
 
-# Python cache
 __pycache__/
+
+test_whale_tracker.py/
+test_enhanced_whale_tracker.py/
+SETUP.md/
