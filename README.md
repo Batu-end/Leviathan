@@ -47,13 +47,7 @@ Your Discord bot needs these permissions:
 - ✅ `Embed Links`
 - ✅ `Read Message History`
 
-### 3. Run Your Enhanced Bot
-```bash
-# Same command as before, now with whale powers!
-/Users/batu/Desktop/Leviathan/venv/bin/python /Users/batu/Desktop/Leviathan/main.py
-```
-
-## 🎮 How to Use
+## Usage & Commands
 
 ### Quick Whale Check
 ```
@@ -133,16 +127,3 @@ whale_tracker = WhaleTracker(
 ✅ **Discord integration** - Slash commands + auto alerts  
 ✅ **Background monitoring** - Continuous scanning  
 ✅ **Error handling** - Graceful failure recovery  
-
-## 🧪 Testing
-
-Test your setup:
-```bash
-# Test whale system
-python test_whale_tracker.py
-
-# Test bot (will need valid Discord token)
-python main.py
-```
-
-Your Leviathan bot is now a comprehensive whale tracking system! 🐋
