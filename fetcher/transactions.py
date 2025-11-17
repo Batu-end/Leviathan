@@ -13,10 +13,9 @@ Features:
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 import aiohttp
-import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -384,7 +383,7 @@ class EthereumWhaleMonitor:
             return self.eth_price or 2500  # Fallback price
     
     async def fetch_large_eth_transfers(self, session: aiohttp.ClientSession) -> List[Dict]:
-        """Fetch large ETH transfers using Etherscan API"""
+        """Fetch large ETH transfers using Etherscan API V2"""
         if 'etherscan' not in self.tracker.api_keys:
             logger.warning("Etherscan API key not provided")
             return []
@@ -392,39 +391,54 @@ class EthereumWhaleMonitor:
         try:
             await self.tracker.rate_limit('etherscan')
             
-            # Get latest block number
-            url = f"https://api.etherscan.io/api?module=proxy&action=eth_blockNumber&apikey={self.tracker.api_keys['etherscan']}"
+            # Use Etherscan V2 API - Get latest block number
+            url = f"https://api.etherscan.io/v2/api?chainid=1&module=proxy&action=eth_blockNumber&apikey={self.tracker.api_keys['etherscan']}"
             async with session.get(url) as response:
                 data = await response.json()
+                if 'result' not in data:
+                    logger.error("Failed to get latest block: %s", data)
+                    return []
                 latest_block = int(data['result'], 16)
             
             # Get transactions from recent blocks
             large_transfers = []
-            for block_offset in range(5):  # Check last 5 blocks
+            for block_offset in range(3):  # Check last 3 blocks (reduced for rate limiting)
                 block_num = latest_block - block_offset
                 
                 await self.tracker.rate_limit('etherscan')
-                block_url = f"https://api.etherscan.io/api?module=proxy&action=eth_getBlockByNumber&tag=0x{block_num:x}&boolean=true&apikey={self.tracker.api_keys['etherscan']}"
+                # Use V2 API endpoint
+                block_url = f"https://api.etherscan.io/v2/api?chainid=1&module=proxy&action=eth_getBlockByNumber&tag=0x{block_num:x}&boolean=true&apikey={self.tracker.api_keys['etherscan']}"
                 
                 async with session.get(block_url) as response:
                     block_data = await response.json()
                     
-                for tx in block_data.get('result', {}).get('transactions', []):
+                if 'result' not in block_data or not block_data['result']:
+                    continue
+                    
+                transactions = block_data['result'].get('transactions', [])
+                if not transactions:
+                    continue
+                    
+                for tx in transactions:
                     if tx.get('value') and tx['value'] != '0x0':
-                        wei_amount = int(tx['value'], 16)
-                        eth_amount = wei_amount / 10**18
-                        usd_value = eth_amount * self.eth_price
-                        
-                        if usd_value >= self.tracker.eth_threshold:
-                            large_transfers.append({
-                                'hash': tx['hash'],
-                                'eth_amount': eth_amount,
-                                'usd_value': usd_value,
-                                'from': tx['from'],
-                                'to': tx['to'],
-                                'block_number': block_num,
-                                'type': 'ethereum_transfer'
-                            })
+                        try:
+                            wei_amount = int(tx['value'], 16)
+                            eth_amount = wei_amount / 10**18
+                            usd_value = eth_amount * self.eth_price
+                            
+                            if usd_value >= self.tracker.eth_threshold:
+                                large_transfers.append({
+                                    'hash': tx['hash'],
+                                    'eth_amount': eth_amount,
+                                    'usd_value': usd_value,
+                                    'from': tx['from'],
+                                    'to': tx['to'],
+                                    'block_number': block_num,
+                                    'type': 'ethereum_transfer'
+                                })
+                        except (ValueError, KeyError) as parse_error:
+                            logger.debug("Failed to parse transaction: %s", parse_error)
+                            continue
                             
             return large_transfers
             

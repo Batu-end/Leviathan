@@ -55,6 +55,101 @@ def run_bot():
             'unknown_transfer': '❓➡️'
         }
         return emoji_map.get(tx_type, '💰')
+    
+    @tasks.loop(minutes=5)
+    async def whale_monitor():
+        """Background task to monitor for whale activity"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Update prices
+                await asyncio.gather(
+                    btc_monitor.get_btc_price(session),
+                    eth_monitor.get_eth_price(session)
+                )
+                
+                # Monitor all sources (US exchanges + on-chain)
+                results = await asyncio.gather(
+                    btc_monitor.fetch_large_transactions(session),
+                    btc_monitor.monitor_mempool(session),
+                    eth_monitor.fetch_large_eth_transfers(session),  # ← Added ETH on-chain monitoring
+                    exchange_monitor.monitor_coinbase_pro_orderbook(session, 'BTC-USD'),
+                    exchange_monitor.monitor_coinbase_pro_orderbook(session, 'ETH-USD'),
+                    exchange_monitor.monitor_kraken_orderbook(session, 'BTCUSD'),
+                    exchange_monitor.monitor_kraken_orderbook(session, 'ETHUSD'),
+                    exchange_monitor.monitor_gemini_orderbook(session, 'btcusd'),
+                    exchange_monitor.monitor_gemini_orderbook(session, 'ethusd'),
+                    return_exceptions=True
+                )
+                
+                # Process whale activities
+                whale_alerts = []
+                for result in results:
+                    if isinstance(result, list):
+                        whale_alerts.extend(result)
+                
+                # Send alerts to the first text channel (you can customize this)
+                if whale_alerts and bot.guilds:
+                    channel = discord.utils.get(bot.guilds[0].channels, type=discord.ChannelType.text)
+                    
+                    for whale_activity in whale_alerts[:3]:  # Limit to 3 alerts per cycle
+                        embed = discord.Embed(
+                            title="🚨 WHALE ALERT 🚨",
+                            color=0xff0000,
+                            timestamp=datetime.utcnow()
+                        )
+                        
+                        if whale_activity['type'] == 'bitcoin_transfer':
+                            tx_type = whale_activity.get('transaction_type', 'transfer')
+                            tx_emoji = get_transaction_emoji(tx_type)
+                            
+                            # Build description with transaction details
+                            description = f"{tx_emoji} **Large BTC {tx_type.replace('_', ' ').title()} Detected**\n\n"
+                            description += f"💰 **Amount:** {whale_activity['btc_amount']:.2f} BTC\n"
+                            description += f"💵 **Value:** ${whale_activity['usd_value']:,.2f}\n"
+                            
+                            # Add from/to information if available
+                            if whale_activity.get('from_addresses'):
+                                from_entity = whale_activity['from_addresses'][0].get('entity', 'Unknown')
+                                description += f"📤 **From:** {from_entity}\n"
+                            
+                            if whale_activity.get('to_addresses'):
+                                to_entity = whale_activity['to_addresses'][0].get('entity', 'Unknown')
+                                description += f"📥 **To:** {to_entity}\n"
+                            
+                            embed.description = description
+                            embed.add_field(name="🔗 Hash", value=f"`{whale_activity['hash'][:16]}...`", inline=False)
+                            
+                            # Add transaction pattern info
+                            if whale_activity.get('pattern'):
+                                pattern = whale_activity['pattern'].replace('_', ' ').title()
+                                embed.add_field(name="📊 Pattern", value=pattern, inline=True)
+                            
+                        elif whale_activity['type'] == 'ethereum_transfer':
+                            # Handle ETH on-chain transfers
+                            description = f"💎 **Large ETH Transfer Detected**\n\n"
+                            description += f"💰 **Amount:** {whale_activity['eth_amount']:.2f} ETH\n"
+                            description += f"💵 **Value:** ${whale_activity['usd_value']:,.2f}\n"
+                            description += f"📤 **From:** `{whale_activity['from'][:10]}...`\n"
+                            description += f"📥 **To:** `{whale_activity['to'][:10]}...`\n"
+                            
+                            embed.description = description
+                            embed.add_field(name="🔗 Hash", value=f"`{whale_activity['hash'][:16]}...`", inline=False)
+                            embed.add_field(name="📦 Block", value=f"{whale_activity.get('block_number', 'N/A')}", inline=True)
+                            
+                        elif whale_activity['type'] == 'exchange_order':
+                            emoji = "📈" if whale_activity['side'] == 'buy' else "📉"
+                            embed.description = f"{emoji} **Large {whale_activity['side'].title()} Order**\n\n🏛️ **Exchange:** {whale_activity['exchange'].title()}\n💱 **Symbol:** {whale_activity['symbol']}\n💰 **Value:** ${whale_activity['usd_value']:,.2f}"
+                        
+                        if channel:
+                            await channel.send(embed=embed)
+                
+        except (aiohttp.ClientError, asyncio.TimeoutError, KeyError) as e:
+            print(f"Whale monitoring error: {e}")
+
+    @whale_monitor.before_loop
+    async def before_whale_monitor():
+        """Wait for bot to be ready before starting monitoring"""
+        await bot.wait_until_ready()
 
     @bot.event
     async def on_ready():
@@ -100,6 +195,7 @@ def run_bot():
                 # Check for recent whale activity
                 btc_transactions = await btc_monitor.fetch_large_transactions(session)
                 btc_mempool = await btc_monitor.monitor_mempool(session)
+                eth_transactions = await eth_monitor.fetch_large_eth_transfers(session)  # ← Added ETH on-chain
                 
                 # Monitor US exchanges
                 coinbase_btc = await exchange_monitor.monitor_coinbase_pro_orderbook(session, 'BTC-USD')
@@ -113,7 +209,7 @@ def run_bot():
                 
                 # Format results
                 btc_summary = f"**Confirmed:** {len(btc_transactions)}\n**Pending:** {len(btc_mempool)}\n**Exchange:** {len(btc_orders)}"
-                eth_summary = f"**Exchange:** {len(eth_orders)}"
+                eth_summary = f"**On-chain:** {len(eth_transactions)}\n**Exchange:** {len(eth_orders)}"
                 
                 embed.add_field(
                     name="₿ Bitcoin Activity",
@@ -155,6 +251,24 @@ def run_bot():
                     embed.add_field(
                         name="📈 Recent Large BTC Transactions",
                         value="\n\n".join(btc_details)[:1024],
+                        inline=False
+                    )
+                
+                # Show recent large ETH transactions
+                if eth_transactions:
+                    recent_eth = eth_transactions[:3]
+                    eth_details = []
+                    for tx in recent_eth:
+                        from_addr = tx.get('from', 'Unknown')[:10]
+                        to_addr = tx.get('to', 'Unknown')[:10]
+                        eth_details.append(
+                            f"💰 **{tx['eth_amount']:.2f} ETH** (${tx['usd_value']:,.0f})\n"
+                            f"   From: `{from_addr}...` → To: `{to_addr}...`"
+                        )
+                    
+                    embed.add_field(
+                        name="📈 Recent Large ETH Transactions",
+                        value="\n\n".join(eth_details)[:1024],
                         inline=False
                     )
                 
@@ -296,88 +410,6 @@ def run_bot():
             )
         
         await interaction.followup.send(embed=embed)
-
-    @tasks.loop(minutes=5)
-    async def whale_monitor():
-        """Background task to monitor for whale activity"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Update prices
-                await asyncio.gather(
-                    btc_monitor.get_btc_price(session),
-                    eth_monitor.get_eth_price(session)
-                )
-                
-                # Monitor all sources (US exchanges)
-                results = await asyncio.gather(
-                    btc_monitor.fetch_large_transactions(session),
-                    btc_monitor.monitor_mempool(session),
-                    exchange_monitor.monitor_coinbase_pro_orderbook(session, 'BTC-USD'),
-                    exchange_monitor.monitor_coinbase_pro_orderbook(session, 'ETH-USD'),
-                    exchange_monitor.monitor_kraken_orderbook(session, 'BTCUSD'),
-                    exchange_monitor.monitor_kraken_orderbook(session, 'ETHUSD'),
-                    exchange_monitor.monitor_gemini_orderbook(session, 'btcusd'),
-                    exchange_monitor.monitor_gemini_orderbook(session, 'ethusd'),
-                    return_exceptions=True
-                )
-                
-                # Process whale activities
-                whale_alerts = []
-                for result in results:
-                    if isinstance(result, list):
-                        whale_alerts.extend(result)
-                
-                # Send alerts to the first text channel (you can customize this)
-                if whale_alerts and bot.guilds:
-                    channel = discord.utils.get(bot.guilds[0].channels, type=discord.ChannelType.text)
-                    
-                    for whale_activity in whale_alerts[:3]:  # Limit to 3 alerts per cycle
-                        embed = discord.Embed(
-                            title="🚨 WHALE ALERT 🚨",
-                            color=0xff0000,
-                            timestamp=datetime.utcnow()
-                        )
-                        
-                        if whale_activity['type'] == 'bitcoin_transfer':
-                            tx_type = whale_activity.get('transaction_type', 'transfer')
-                            tx_emoji = get_transaction_emoji(tx_type)
-                            
-                            # Build description with transaction details
-                            description = f"{tx_emoji} **Large BTC {tx_type.replace('_', ' ').title()} Detected**\n\n"
-                            description += f"💰 **Amount:** {whale_activity['btc_amount']:.2f} BTC\n"
-                            description += f"💵 **Value:** ${whale_activity['usd_value']:,.2f}\n"
-                            
-                            # Add from/to information if available
-                            if whale_activity.get('from_addresses'):
-                                from_entity = whale_activity['from_addresses'][0].get('entity', 'Unknown')
-                                description += f"📤 **From:** {from_entity}\n"
-                            
-                            if whale_activity.get('to_addresses'):
-                                to_entity = whale_activity['to_addresses'][0].get('entity', 'Unknown')
-                                description += f"📥 **To:** {to_entity}\n"
-                            
-                            embed.description = description
-                            embed.add_field(name="🔗 Hash", value=f"`{whale_activity['hash'][:16]}...`", inline=False)
-                            
-                            # Add transaction pattern info
-                            if whale_activity.get('pattern'):
-                                pattern = whale_activity['pattern'].replace('_', ' ').title()
-                                embed.add_field(name="📊 Pattern", value=pattern, inline=True)
-                            
-                        elif whale_activity['type'] == 'exchange_order':
-                            emoji = "📈" if whale_activity['side'] == 'buy' else "📉"
-                            embed.description = f"{emoji} **Large {whale_activity['side'].title()} Order**\n\n🏛️ **Exchange:** {whale_activity['exchange'].title()}\n💱 **Symbol:** {whale_activity['symbol']}\n💰 **Value:** ${whale_activity['usd_value']:,.2f}"
-                        
-                        if channel:
-                            await channel.send(embed=embed)
-                
-        except Exception as e:
-            print(f"Whale monitoring error: {e}")
-
-    @whale_monitor.before_loop
-    async def before_whale_monitor():
-        """Wait for bot to be ready before starting monitoring"""
-        await bot.wait_until_ready()
 
     # Traditional command for backwards compatibility
     @bot.command(name='whales')
