@@ -1,7 +1,6 @@
 """
 Discord Bot Integration for Whale Tracker
 
-Add these commands to your existing Discord bot to provide whale tracking functionality.
 """
 
 import discord

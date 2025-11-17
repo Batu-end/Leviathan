@@ -4,6 +4,7 @@
 
 __pycache__/
 
-test_whale_tracker.py/
-test_enhanced_whale_tracker.py/
-SETUP.md/
+test_whale_tracker.py
+test_enhanced_whale_tracker.py
+test_eth_monitoring.py
+# whale_bot_integration.py
